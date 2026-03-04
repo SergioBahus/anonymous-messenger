@@ -8,49 +8,63 @@ struct GrowingTextEditor: NSViewRepresentable {
 
     var maxLines: Int = 10
 
-    /// Enter -> Send
+    /// Extra reserved width INSIDE the text layout area (e.g. paperclip button)
+    var leadingAccessoryWidth: CGFloat = 0
+
+    /// Extra reserved width INSIDE the text layout area (e.g. send button)
+    var trailingAccessoryWidth: CGFloat = 0
+
+    /// Called when user presses Enter (Return). Shift+Enter inserts a new line.
     var onEnterSend: (() -> Void)? = nil
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text, height: $height, pinnedToMax: $pinnedToMax, maxLines: maxLines)
+        Coordinator(parent: self)
     }
 
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSScrollView()
-        scrollView.hasVerticalScroller = false
-        scrollView.hasHorizontalScroller = false
         scrollView.drawsBackground = false
-        scrollView.borderType = .noBorder
+        scrollView.hasVerticalScroller = false
         scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
 
         let textView = CustomNSTextView()
-        textView.delegate = context.coordinator
-
+        textView.isEditable = true
+        textView.isSelectable = true
         textView.isRichText = false
         textView.importsGraphics = false
         textView.allowsUndo = true
+        textView.backgroundColor = .clear
+        textView.font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        textView.textColor = .labelColor
 
-        // перенос строк
-        textView.isHorizontallyResizable = false
-        textView.isVerticallyResizable = true
-        textView.autoresizingMask = [.width]
-        textView.textContainer?.widthTracksTextView = true
+        // make wrapping predictable
+        textView.textContainer?.widthTracksTextView = false
+        textView.textContainer?.heightTracksTextView = false
         textView.textContainer?.lineBreakMode = .byWordWrapping
+        textView.textContainer?.lineFragmentPadding = 0
 
-        // фон рисуем SwiftUI-обёрткой
-        textView.drawsBackground = false
-        textView.font = NSFont.systemFont(ofSize: 14)
-        textView.textContainerInset = NSSize(width: 8, height: 8)
+        // insets
+        textView.textContainerInset = NSSize(width: 8, height: 8) // базово
+        // фактический inset скорректируется в updateContainerWidth()
 
-        // Enter/Shift+Enter логика
+        // hook up callbacks & accessory widths
         textView.onEnterSend = onEnterSend
+        textView.leadingAccessoryWidth = leadingAccessoryWidth
+        textView.trailingAccessoryWidth = trailingAccessoryWidth
+        textView.needsLayout = true
+        textView.layoutManager?.ensureLayout(for: textView.textContainer!)
 
+        // initial text
         textView.string = text
+
+        // delegate for text changes
+        textView.delegate = context.coordinator
+
         scrollView.documentView = textView
 
-        DispatchQueue.main.async {
-            context.coordinator.recalculateHeight(textView: textView, scrollView: scrollView)
-        }
+        // initial sizing
+        context.coordinator.recalculateHeight(for: textView, in: scrollView)
 
         return scrollView
     }
@@ -58,117 +72,148 @@ struct GrowingTextEditor: NSViewRepresentable {
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         guard let textView = nsView.documentView as? CustomNSTextView else { return }
 
+        // keep callback updated (it can capture contact etc.)
+        textView.onEnterSend = onEnterSend
+
+        // update accessory widths (affects layout width)
+        textView.leadingAccessoryWidth = leadingAccessoryWidth
+        textView.trailingAccessoryWidth = trailingAccessoryWidth
+
+        // update text if needed
         if textView.string != text {
             textView.string = text
         }
-        textView.onEnterSend = onEnterSend
 
-        context.coordinator.recalculateHeight(textView: textView, scrollView: nsView)
+        // recompute layout + height
+        context.coordinator.recalculateHeight(for: textView, in: nsView)
     }
 
-    final class Coordinator: NSObject, NSTextViewDelegate {
-        @Binding var text: String
-        @Binding var height: CGFloat
-        @Binding var pinnedToMax: Bool
-        let maxLines: Int
+    // MARK: - Coordinator
 
-        init(text: Binding<String>, height: Binding<CGFloat>, pinnedToMax: Binding<Bool>, maxLines: Int) {
-            _text = text
-            _height = height
-            _pinnedToMax = pinnedToMax
-            self.maxLines = maxLines
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: GrowingTextEditor
+
+        init(parent: GrowingTextEditor) {
+            self.parent = parent
         }
 
         func textDidChange(_ notification: Notification) {
-            guard let tv = notification.object as? NSTextView,
-                  let scroll = tv.enclosingScrollView else { return }
+            guard let textView = notification.object as? NSTextView,
+                  let scrollView = textView.enclosingScrollView else { return }
 
-            text = tv.string
-
-            // если текст пустой — снимаем “залипание” (после отправки/очистки)
-            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                pinnedToMax = false
+            // sync SwiftUI binding
+            let newText = textView.string
+            if parent.text != newText {
+                parent.text = newText
             }
 
-            recalculateHeight(textView: tv, scrollView: scroll)
+            recalculateHeight(for: textView, in: scrollView)
         }
 
-        func recalculateHeight(textView: NSTextView, scrollView: NSScrollView) {
+        func recalculateHeight(for textView: NSTextView, in scrollView: NSScrollView) {
+            // Ensure layout is up to date
             guard let layoutManager = textView.layoutManager,
                   let textContainer = textView.textContainer else { return }
 
-            let availableWidth = max(50, scrollView.contentSize.width)
-            textContainer.containerSize = NSSize(width: availableWidth, height: .greatestFiniteMagnitude)
-            textContainer.widthTracksTextView = true
-
             layoutManager.ensureLayout(for: textContainer)
 
-            let used = layoutManager.usedRect(for: textContainer).height
-            let inset = textView.textContainerInset.height
-            let contentHeight = used + inset * 2
+            // Used rect height (content height)
+            let used = layoutManager.usedRect(for: textContainer).size.height
 
-            let lineHeight: CGFloat = {
-                if let font = textView.font {
-                    return font.ascender - font.descender + font.leading
-                }
-                return 18
-            }()
+            // Insets (top+bottom)
+            let insetY = textView.textContainerInset.height * 2
 
-            let minHeight = (lineHeight * 1) + inset * 2
-            let maxHeight = (lineHeight * CGFloat(maxLines)) + inset * 2
+            // Line height (fallback if font nil)
+            let lineHeight: CGFloat = (textView.font?.boundingRectForFont.height ?? 17)
 
-            // если дошли до максимума — “залипаем”
-            if contentHeight >= maxHeight - 0.5, !pinnedToMax {
-                pinnedToMax = true
-            }
+            // Minimum height = 1 line + insets
+            let minHeight = lineHeight + insetY
 
-            // высота:
-            // - если залипли и текст не пустой -> держим maxHeight
-            // - иначе растём/уменьшаемся обычно
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            let targetHeight: CGFloat
-            if pinnedToMax, !trimmed.isEmpty {
-                targetHeight = maxHeight
-            } else {
-                targetHeight = min(maxHeight, max(minHeight, contentHeight))
-            }
+            // Maximum height = maxLines + insets
+            let maxHeight = (lineHeight * CGFloat(max(parent.maxLines, 1))) + insetY
 
-            // скролл внутри поля включаем только когда контента больше maxHeight
-            let needsScroll = contentHeight > maxHeight + 0.5
-            scrollView.hasVerticalScroller = needsScroll
+            // Desired height (clamped)
+            let desired = min(max(used + insetY, minHeight), maxHeight)
 
-            if abs(height - targetHeight) > 0.5 {
+            let shouldPin = (used + insetY) > maxHeight + 0.5
+
+            // Toggle inner scrolling when pinned
+            scrollView.hasVerticalScroller = shouldPin
+            scrollView.autohidesScrollers = true
+
+            if parent.pinnedToMax != shouldPin {
                 DispatchQueue.main.async {
-                    self.height = targetHeight
+                    self.parent.pinnedToMax = shouldPin
                 }
             }
 
-            // Для скролла документ должен быть выше видимой области
-            if let doc = scrollView.documentView {
-                var f = doc.frame
-                f.size.width = availableWidth
-                f.size.height = max(contentHeight, targetHeight)
-                doc.frame = f
+            // Update height binding only if it meaningfully changed (reduces "jumping")
+            if abs(parent.height - desired) > 0.5 {
+                DispatchQueue.main.async {
+                    self.parent.height = desired
+                }
             }
         }
     }
 }
 
+// MARK: - CustomNSTextView
+
 final class CustomNSTextView: NSTextView {
+
     var onEnterSend: (() -> Void)?
 
+    /// Reserved width inside text layout (left)
+    var leadingAccessoryWidth: CGFloat = 0 {
+        didSet { updateContainerWidth() }
+    }
+
+    /// Reserved width inside text layout (right)
+    var trailingAccessoryWidth: CGFloat = 0 {
+        didSet { updateContainerWidth() }
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        updateContainerWidth()
+    }
+
+    private func updateContainerWidth() {
+        guard let textContainer = textContainer else { return }
+
+        // Сколько реального "паддинга" мы хотим внутри текста слева/справа
+        let basePad: CGFloat = 8
+
+        // Реальный старт текста (курсор) сдвигаем вправо/влево за счёт inset
+        textContainerInset = NSSize(
+            width: basePad + leadingAccessoryWidth,
+            height: textContainerInset.height
+        )
+
+        // А справа резерв делаем через уменьшение ширины контейнера
+        let rightInset = basePad + trailingAccessoryWidth
+
+        let usable = max(0, bounds.width - (textContainerInset.width + rightInset))
+
+        textContainer.containerSize = NSSize(width: usable, height: .greatestFiniteMagnitude)
+        textContainer.widthTracksTextView = false
+    }
+
     override func keyDown(with event: NSEvent) {
-        // Enter
-        if event.keyCode == 36 {
-            // Shift+Enter -> новая строка
+        // Return (36) or Numpad Enter (76)
+        if event.keyCode == 36 || event.keyCode == 76 {
+            // Shift+Enter -> newline
             if event.modifierFlags.contains(.shift) {
-                super.keyDown(with: event)
+                insertNewline(nil)
                 return
             }
-            // Enter -> отправка
-            onEnterSend?()
-            return
+            // Enter -> send (if handler exists)
+            if let onEnterSend = onEnterSend {
+                onEnterSend()
+                return
+            }
         }
+
         super.keyDown(with: event)
     }
 }

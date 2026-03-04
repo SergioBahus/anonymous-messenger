@@ -54,6 +54,8 @@ struct MainView: View {
     // Current chat runtime tracking (to save position correctly)
     @State private var currentTopVisibleMessageId: UUID? = nil
     @State private var scrollViewportHeight: CGFloat = 0
+    
+    @State private var pickedFileURL: URL?
 
     private let transport: FileTransport
 
@@ -168,8 +170,8 @@ struct MainView: View {
 
                     GeometryReader { outerGeo in
                         ScrollView {
-                            VStack(spacing: 10) {
-                                ForEach(chatMessages) { msg in
+                            LazyVStack(spacing: 10) {
+                                ForEach(Array(chatMessages.enumerated()), id: \.element.id) { i, msg in
                                     let outgoing = (msg.senderSessionId == mySessionId)
 
                                     HStack {
@@ -187,11 +189,17 @@ struct MainView: View {
                                     .id(msg.id)
                                     // фиксируем позицию каждого сообщения относительно верха ScrollView
                                     .background(
-                                        GeometryReader { geo in
-                                            Color.clear.preference(
-                                                key: VisibleMsgMinYKey.self,
-                                                value: [msg.id: geo.frame(in: .named("CHAT_SCROLL")).minY]
-                                            )
+                                        Group {
+                                            if i % 6 == 0 {
+                                                GeometryReader { geo in
+                                                    Color.clear.preference(
+                                                        key: VisibleMsgMinYKey.self,
+                                                        value: [msg.id: geo.frame(in: .named("CHAT_SCROLL")).minY]
+                                                    )
+                                                }
+                                            } else {
+                                                Color.clear
+                                            }
                                         }
                                     )
                                 }
@@ -312,34 +320,76 @@ struct MainView: View {
 
             Divider()
 
-            HStack(spacing: 10) {
-                GrowingTextEditor(
-                    text: $draft,
-                    height: $inputHeight,
-                    pinnedToMax: $inputPinnedToMax,
-                    maxLines: 10,
-                    onEnterSend: {
-                        sendMessage(to: contact)
-                    }
-                )
-                .frame(height: inputHeight)
-                .padding(.vertical, 6)
-                .padding(.horizontal, 6)
-                .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(Color.primary.opacity(0.06))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color.primary.opacity(0.18))
-                )
+            // --- Composer (input bar) ---
+            let minH: CGFloat = 36          // 1 строка (можешь подстроить 34–40)
+            let maxH: CGFloat = 200         // ~10 строк (если хочешь чуть меньше/больше — подстрой)
+            let clampedH = min(max(inputHeight, minH), maxH)
 
-                Button("Send") {
-                    sendMessage(to: contact)
+            HStack(spacing: 10) {
+
+                ZStack {
+                    // рамка/фон одного "поля"
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.primary.opacity(0.06))
+
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.primary.opacity(0.18))
+
+                    // Editor
+                    GrowingTextEditor(
+                        text: $draft,
+                        height: $inputHeight,
+                        pinnedToMax: $inputPinnedToMax,
+                        maxLines: 10,
+                        leadingAccessoryWidth: 26,
+                        trailingAccessoryWidth: 40,
+                        onEnterSend: {
+                            sendMessage(to: contact)
+                        }
+                    )
+                    .padding(.leading, 6)     // общий внутренний паддинг поля
+                    .overlay(alignment: .trailing) {
+                        Color.clear.frame(width: 40)
+                    }
+                    .padding(.vertical, 6)
+
+                    // Иконки внутри поля (слева/справа)
+                    HStack {
+                        Button {
+                            pickAttachment()
+                        } label: {
+                            Image(systemName: "paperclip")
+                                .font(.system(size: 16))
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.leading, 12)
+
+                        Spacer()
+
+                        Button {
+                            sendMessage(to: contact)
+                        } label: {
+                            Image(systemName: "paperplane.fill")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundColor(isDraftEmpty ? .secondary : .accentColor)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isDraftEmpty)
+                        .padding(.trailing, 12)
+                    }
                 }
+                // ВАЖНО: высоту задаём контейнеру, а не только editor-у
+                .frame(maxWidth: .infinity)
+                .frame(height: clampedH)
             }
-            .padding()
+            .padding(.horizontal, 12)
+            .padding(.bottom, 10)
         }
+    }
+    
+    private var isDraftEmpty: Bool {
+        draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     // MARK: - Data helpers
@@ -350,7 +400,7 @@ struct MainView: View {
                 ($0.senderSessionId == mySessionId && $0.receiverSessionId == contact.sessionId) ||
                 ($0.senderSessionId == contact.sessionId && $0.receiverSessionId == mySessionId)
             }
-            .sorted { $0.timestamp < $1.timestamp }
+            
     }
 
     private func addContact(sessionId: String) {
@@ -407,6 +457,19 @@ struct MainView: View {
         inputHeight = 34
 
         transport.send(env)
+    }
+    
+    private func pickAttachment() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+
+        if panel.runModal() == .OK {
+            pickedFileURL = panel.url
+            // пока просто храним; позже добавим отправку/превью
+            print("Picked attachment:", pickedFileURL?.path ?? "nil")
+        }
     }
 
     private func handleIncoming(_ envelope: Envelope) {
