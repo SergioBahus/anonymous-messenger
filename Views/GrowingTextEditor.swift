@@ -76,7 +76,7 @@ struct GrowingTextEditor: NSViewRepresentable {
         textView.layoutManager?.ensureLayout(for: textView.textContainer!)
 
         // initial text
-        textView.setDisplayString(text)
+        textView.setPlainString(text)
 
         // delegate for text changes
         textView.delegate = context.coordinator
@@ -110,7 +110,7 @@ struct GrowingTextEditor: NSViewRepresentable {
         textView.trailingAccessoryWidth = trailingAccessoryWidth
 
         // update text if needed
-        textView.setDisplayString(text)
+        textView.setPlainString(text)
 
         // recompute layout + height
         context.coordinator.recalculateHeight(for: textView, in: nsView)
@@ -130,7 +130,7 @@ struct GrowingTextEditor: NSViewRepresentable {
                   let scrollView = textView.enclosingScrollView else { return }
 
             // sync SwiftUI binding
-            let newText = (textView as? CustomNSTextView)?.getPlainString() ?? textView.string
+            let newText = textView.string
             if parent.text != newText {
                 parent.text = newText
             }
@@ -197,65 +197,8 @@ struct GrowingTextEditor: NSViewRepresentable {
 // MARK: - CustomNSTextView
 
 final class CustomNSTextView: NSTextView {
-    
-    private let zwsp = "\u{200B}"   // zero-width space
 
-    func setDisplayString(_ plain: String) {
-        // Если пусто — держим ZWSP внутри NSTextView, чтобы каретка не "прыгала"
-        if plain.isEmpty {
-            if self.string != zwsp {
-                self.string = zwsp
-                self.setSelectedRange(NSRange(location: 1, length: 0))
-            }
-        } else {
-            if self.string != plain {
-                self.string = plain
-            }
-        }
-    }
-
-    func getPlainString() -> String {
-        // Снаружи считаем ZWSP как пустое
-        return (self.string == zwsp) ? "" : self.string
-    }
-    
-    func applyStableTypingAttributes() {
-        let fontToUse = self.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
-
-        let p = NSMutableParagraphStyle()
-        p.lineSpacing = 0
-        p.paragraphSpacing = 0
-        p.paragraphSpacingBefore = 0
-
-        // фиксируем lineHeight, чтобы каретка в пустом поле стояла ровно
-        let lh = fontToUse.boundingRectForFont.height
-        p.minimumLineHeight = lh
-        p.maximumLineHeight = lh
-
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: fontToUse,
-            .foregroundColor: (self.textColor ?? NSColor.labelColor),
-            .paragraphStyle: p
-        ]
-
-        self.typingAttributes = attrs
-        self.defaultParagraphStyle = p
-
-        // КЛЮЧЕВО: если пусто — задаём пустую attributed-строку с этими атрибутами,
-        // чтобы baseline/каретка считались одинаково до первого ввода.
-        if self.string.isEmpty || self.string == zwsp {
-            self.textStorage?.setAttributedString(NSAttributedString(string: zwsp, attributes: attrs))
-            self.setSelectedRange(NSRange(location: 1, length: 0))
-        }
-    }
-
-    override func becomeFirstResponder() -> Bool {
-        let ok = super.becomeFirstResponder()
-        if ok {
-            applyStableTypingAttributes()
-        }
-        return ok
-    }
+    // MARK: - Public callbacks / config
 
     var onEnterSend: (() -> Void)?
 
@@ -269,6 +212,56 @@ final class CustomNSTextView: NSTextView {
         didSet { updateContainerWidth() }
     }
 
+    // MARK: - Internal state (caret fix)
+
+    private var hasEverEdited = false
+    /// Подними/опусти каретку на первом клике в пустом поле (обычно 2–3 идеально)
+    private let initialEmptyCaretYFix: CGFloat = -4
+
+    // MARK: - Text helpers
+
+    func setPlainString(_ plain: String) {
+        if self.string != plain {
+            self.string = plain
+        }
+        applyStableTypingAttributes()
+    }
+
+    func applyStableTypingAttributes() {
+        let fontToUse = self.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+
+        let p = NSMutableParagraphStyle()
+        p.lineSpacing = 0
+        p.paragraphSpacing = 0
+        p.paragraphSpacingBefore = 0
+
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: fontToUse,
+            .foregroundColor: (self.textColor ?? NSColor.labelColor),
+            .paragraphStyle: p
+        ]
+
+        self.typingAttributes = attrs
+        self.defaultParagraphStyle = p
+
+        // Если пусто — всё равно задаём storage с нужными атрибутами (без вставки символов)
+        if self.string.isEmpty {
+            self.textStorage?.setAttributedString(NSAttributedString(string: "", attributes: attrs))
+            self.setSelectedRange(NSRange(location: 0, length: 0))
+        }
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let ok = super.becomeFirstResponder()
+        if ok {
+            applyStableTypingAttributes()
+            updateContainerWidth()
+        }
+        return ok
+    }
+
+    // MARK: - Layout
+
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         updateContainerWidth()
@@ -277,23 +270,23 @@ final class CustomNSTextView: NSTextView {
     private func updateContainerWidth() {
         guard let textContainer = textContainer else { return }
 
-        // Сколько реального "паддинга" мы хотим внутри текста слева/справа
         let basePad: CGFloat = 8
 
-        // Реальный старт текста (курсор) сдвигаем вправо/влево за счёт inset
+        // Старт текста/каретки сдвигаем вправо за счёт inset (под скрепку)
         textContainerInset = NSSize(
             width: basePad + leadingAccessoryWidth,
             height: textContainerInset.height
         )
 
-        // А справа резерв делаем через уменьшение ширины контейнера
+        // Справа резерв делаем через уменьшение ширины контейнера (под самолётик)
         let rightInset = basePad + trailingAccessoryWidth
-
         let usable = max(0, bounds.width - (textContainerInset.width + rightInset))
 
-        textContainer.containerSize = NSSize(width: usable, height: .greatestFiniteMagnitude)
+        textContainer.containerSize = NSSize(width: usable, height: CGFloat.greatestFiniteMagnitude)
         textContainer.widthTracksTextView = false
     }
+
+    // MARK: - Keys
 
     override func keyDown(with event: NSEvent) {
         // Return (36) or Numpad Enter (76)
@@ -303,13 +296,43 @@ final class CustomNSTextView: NSTextView {
                 insertNewline(nil)
                 return
             }
-            // Enter -> send (if handler exists)
+            // Enter -> send
             if let onEnterSend = onEnterSend {
                 onEnterSend()
                 return
             }
         }
-
         super.keyDown(with: event)
     }
+
+    // MARK: - Caret drawing fix (the real fix)
+
+    override func didChangeText() {
+        hasEverEdited = true
+        super.didChangeText()
+    }
+
+    override func drawInsertionPoint(in rect: NSRect, color: NSColor, turnedOn flag: Bool) {
+        // rect — это то место, которое AppKit будет стирать/рисовать при мигании.
+        // Мы сдвигаем реальный рисунок каретки, но также должны вручную очищать старую область,
+        // иначе остаётся "хвостик".
+
+        let needsFix = self.string.isEmpty && !hasEverEdited
+        let dy = needsFix ? initialEmptyCaretYFix : 0
+
+        // 1) Стираем "оригинальную" область rect (ту, которую AppKit ожидает)
+        // Только когда каретка выключается (blink off), чтобы убрать остатки.
+        if !flag {
+            self.setNeedsDisplay(rect)
+        }
+
+        // 2) Рисуем каретку со сдвигом
+        var shifted = rect
+        shifted.origin.y += dy
+        super.drawInsertionPoint(in: shifted, color: color, turnedOn: flag)
+
+        // 3) И просим перерисовать ещё и сдвинутую область (чтобы не было артефактов)
+        self.setNeedsDisplay(shifted)
+    }
 }
+
