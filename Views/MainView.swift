@@ -32,9 +32,14 @@ struct MainView: View {
     // Per-chat state
     @State private var scrollOffsetByContact: [UUID: CGFloat] = [:]
     @State private var scrollToBottomTickByContact: [UUID: Int] = [:]
+    @State private var scrollToOffsetTickByContact: [UUID: Int] = [:]
+    @State private var jumpTargetOffsetByContact: [UUID: CGFloat] = [:]
+    @State private var firstUnreadOffsetByContact: [UUID: CGFloat] = [:]
+    @State private var contentHeightByContact: [UUID: CGFloat] = [:]
+    @State private var viewportHeightByContact: [UUID: CGFloat] = [:]
     @State private var unreadByContact: [UUID: Int] = [:]
     @State private var atBottomByContact: [UUID: Bool] = [:]
-
+    
     private let transport: FileTransport
 
     var body: some View {
@@ -146,9 +151,14 @@ struct MainView: View {
             set: { scrollOffsetByContact[contact.id] = $0 }
         )
 
-        let scrollToBottomTick = Binding<Int>(
-            get: { scrollToBottomTickByContact[contact.id] ?? 0 },
-            set: { scrollToBottomTickByContact[contact.id] = $0 }
+        let contentHeight = Binding<CGFloat>(
+            get: { contentHeightByContact[contact.id] ?? 0 },
+            set: { contentHeightByContact[contact.id] = $0 }
+        )
+
+        let viewportHeight = Binding<CGFloat>(
+            get: { viewportHeightByContact[contact.id] ?? 0 },
+            set: { viewportHeightByContact[contact.id] = $0 }
         )
 
         return VStack(spacing: 0) {
@@ -156,8 +166,12 @@ struct MainView: View {
                 PreciseScrollView(
                     offsetY: scrollOffset,
                     isAtBottom: isAtBottom,
+                    contentHeight: contentHeight,
+                    viewportHeight: viewportHeight,
                     restoreID: contact.id,
-                    scrollToBottomTick: scrollToBottomTick.wrappedValue
+                    scrollToBottomTick: scrollToBottomTickByContact[contact.id] ?? 0,
+                    scrollToOffsetTick: scrollToOffsetTickByContact[contact.id] ?? 0,
+                    targetOffsetY: jumpTargetOffsetByContact[contact.id] ?? 0
                 ) {
                     LazyVStack(spacing: 10) {
                         ForEach(chatMessages) { msg in
@@ -184,22 +198,31 @@ struct MainView: View {
                         scrollToBottomTickByContact[contact.id] = 0
                     }
 
+                    if scrollToOffsetTickByContact[contact.id] == nil {
+                        scrollToOffsetTickByContact[contact.id] = 0
+                    }
+
                     if scrollOffsetByContact[contact.id] == nil {
                         DispatchQueue.main.async {
                             scrollToBottomTickByContact[contact.id, default: 0] += 1
                             unread.wrappedValue = 0
                             isAtBottom.wrappedValue = true
+                            firstUnreadOffsetByContact[contact.id] = nil
                         }
                     }
                 }
 
                 if !isAtBottom.wrappedValue && unread.wrappedValue > 0 {
                     Button {
-                        withAnimation(.easeOut(duration: 0.2)) {
+                        if let firstUnreadOffset = firstUnreadOffsetByContact[contact.id] {
+                            jumpTargetOffsetByContact[contact.id] = firstUnreadOffset
+                            scrollToOffsetTickByContact[contact.id, default: 0] += 1
+                        } else {
                             scrollToBottomTickByContact[contact.id, default: 0] += 1
                         }
+
                         unread.wrappedValue = 0
-                        isAtBottom.wrappedValue = true
+                        firstUnreadOffsetByContact[contact.id] = nil
                     } label: {
                         HStack(spacing: 8) {
                             Image(systemName: "arrow.down")
@@ -223,9 +246,23 @@ struct MainView: View {
                     DispatchQueue.main.async {
                         scrollToBottomTickByContact[contact.id, default: 0] += 1
                         unread.wrappedValue = 0
+                        firstUnreadOffsetByContact[contact.id] = nil
                     }
                 } else if !outgoing {
+                    if unread.wrappedValue == 0 {
+                        let contentHeight = contentHeightByContact[contact.id] ?? 0
+                        let viewportHeight = viewportHeightByContact[contact.id] ?? 0
+                        let firstUnreadOffset = max(0, contentHeight - viewportHeight)
+                        firstUnreadOffsetByContact[contact.id] = firstUnreadOffset
+                    }
+
                     unread.wrappedValue += 1
+                }
+            }
+            .onChange(of: isAtBottom.wrappedValue) { _, atBottomNow in
+                if atBottomNow {
+                    unread.wrappedValue = 0
+                    firstUnreadOffsetByContact[contact.id] = nil
                 }
             }
 
