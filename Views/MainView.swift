@@ -1,21 +1,12 @@
 import SwiftUI
 
-// MARK: - PreferenceKeys
 
-private struct BottomMaxYKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
+
+private enum ScrollTarget: Hashable {
+    case message(UUID)
+    case bottom
 }
 
-/// msg.id -> minY (в координатах ScrollView)
-private struct VisibleMsgMinYKey: PreferenceKey {
-    static var defaultValue: [UUID: CGFloat] = [:]
-    static func reduce(value: inout [UUID: CGFloat], nextValue: () -> [UUID: CGFloat]) {
-        value.merge(nextValue(), uniquingKeysWith: { $1 })
-    }
-}
 
 // MARK: - MainView
 
@@ -47,13 +38,13 @@ struct MainView: View {
     @State private var addContactError: String?
 
     // Per-chat state
-    @State private var topMessageByContact: [UUID: UUID] = [:]     // contact.id -> msg.id (top visible)
-    @State private var unreadByContact: [UUID: Int] = [:]          // contact.id -> unread count
-    @State private var atBottomByContact: [UUID: Bool] = [:]       // contact.id -> isAtBottom
+    @State private var scrollPositionByContact: [UUID: ScrollTarget] = [:]
+    @State private var unreadByContact: [UUID: Int] = [:]
+    @State private var atBottomByContact: [UUID: Bool] = [:]
 
     // Current chat runtime tracking (to save position correctly)
-    @State private var currentTopVisibleMessageId: UUID? = nil
-    @State private var scrollViewportHeight: CGFloat = 0
+    @State private var isRestoringScrollByContact: [UUID: Bool] = [:]
+    
 
     private let transport: FileTransport
 
@@ -67,7 +58,6 @@ struct MainView: View {
             if selectedContactId == nil {
                 selectedContactId = appData.contacts.first?.id
             }
-
             transport.onReceive = { envelope in
                 handleIncoming(envelope)
             }
@@ -133,6 +123,7 @@ struct MainView: View {
         Group {
             if let contact = selectedContact {
                 chatView(for: contact)
+                    .id(contact.id)
                     .navigationTitle(contact.username)
             } else {
                 Text("Select a contact")
@@ -151,7 +142,6 @@ struct MainView: View {
     private func chatView(for contact: Contact) -> some View {
         let chatMessages = messages(with: contact)
 
-        // bindings to per-contact state
         let unread = Binding<Int>(
             get: { unreadByContact[contact.id] ?? 0 },
             set: { unreadByContact[contact.id] = $0 }
@@ -162,107 +152,60 @@ struct MainView: View {
             set: { atBottomByContact[contact.id] = $0 }
         )
 
+        let scrollPosition = Binding<ScrollTarget?>(
+            get: { scrollPositionByContact[contact.id] },
+            set: { scrollPositionByContact[contact.id] = $0 }
+        )
+
         return VStack(spacing: 0) {
             ScrollViewReader { proxy in
                 ZStack(alignment: .bottomTrailing) {
+                    ScrollView {
+                        LazyVStack(spacing: 10) {
+                            ForEach(chatMessages) { msg in
+                                let outgoing = (msg.senderSessionId == mySessionId)
 
-                    GeometryReader { outerGeo in
-                        ScrollView {
-                            VStack(spacing: 10) {
-                                ForEach(chatMessages) { msg in
-                                    let outgoing = (msg.senderSessionId == mySessionId)
+                                HStack {
+                                    if outgoing { Spacer(minLength: 40) }
 
-                                    HStack {
-                                        if outgoing { Spacer(minLength: 40) }
+                                    Text(msg.body)
+                                        .foregroundStyle(outgoing ? Color.white : Color.primary)
+                                        .padding(10)
+                                        .background(outgoing ? Color.blue : Color.gray.opacity(0.18))
+                                        .cornerRadius(12)
+                                        .frame(maxWidth: 520, alignment: outgoing ? .trailing : .leading)
 
-                                        Text(msg.body)
-                                            .foregroundStyle(outgoing ? Color.white : Color.primary)
-                                            .padding(10)
-                                            .background(outgoing ? Color.blue : Color.gray.opacity(0.18))
-                                            .cornerRadius(12)
-                                            .frame(maxWidth: 520, alignment: outgoing ? .trailing : .leading)
-
-                                        if !outgoing { Spacer(minLength: 40) }
-                                    }
-                                    .id(msg.id)
-                                    // фиксируем позицию каждого сообщения относительно верха ScrollView
-                                    .background(
-                                        GeometryReader { geo in
-                                            Color.clear.preference(
-                                                key: VisibleMsgMinYKey.self,
-                                                value: [msg.id: geo.frame(in: .named("CHAT_SCROLL")).minY]
-                                            )
-                                        }
-                                    )
+                                    if !outgoing { Spacer(minLength: 40) }
                                 }
-
-                                // якорь низа + определение "мы внизу?"
-                                Color.clear
-                                    .frame(height: 1)
-                                    .id("BOTTOM")
-                                    .background(
-                                        GeometryReader { geo in
-                                            Color.clear.preference(
-                                                key: BottomMaxYKey.self,
-                                                value: geo.frame(in: .named("CHAT_SCROLL")).maxY
-                                            )
-                                        }
-                                    )
+                                .id(ScrollTarget.message(msg.id))
                             }
-                            .padding()
+
+                            Color.clear
+                                .frame(height: 1)
+                                .id(ScrollTarget.bottom)
                         }
-                        .coordinateSpace(name: "CHAT_SCROLL")
-
-                        // сохраняем высоту видимой области (для определения "внизу")
-                        .onAppear {
-                            scrollViewportHeight = outerGeo.size.height
-
+                        .padding()
+                        .scrollTargetLayout()
+                    }
+                    .scrollPosition(id: scrollPosition, anchor: .top)
+                    .defaultScrollAnchor(.bottom)
+                    .onAppear {
+                        if scrollPositionByContact[contact.id] == nil {
                             DispatchQueue.main.async {
-                                if let savedTop = topMessageByContact[contact.id] {
-                                    // ✅ вернуться туда же, где был
-                                    proxy.scrollTo(savedTop, anchor: .top)
-                                } else {
-                                    // ✅ первый вход в чат — показать последние
-                                    proxy.scrollTo("BOTTOM", anchor: .bottom)
-                                    unread.wrappedValue = 0
-                                    isAtBottom.wrappedValue = true
-                                }
-                            }
-                        }
-                        .onChange(of: outerGeo.size.height) { _, newH in
-                            scrollViewportHeight = newH
-                        }
-
-                        // определяем top visible msg.id (чтобы восстановить позицию)
-                        .onPreferenceChange(VisibleMsgMinYKey.self) { dict in
-                            // берем сообщение, которое ближе всего к верхней границе (minY >= 0)
-                            let candidates = dict
-                                .filter { $0.value >= 0 }
-                                .sorted { $0.value < $1.value }
-
-                            if let top = candidates.first?.key {
-                                currentTopVisibleMessageId = top
-                            }
-                        }
-
-                        // определяем "мы внизу?"
-                        .onPreferenceChange(BottomMaxYKey.self) { bottomMaxY in
-                            let threshold: CGFloat = 24
-                            let atBottomNow = bottomMaxY <= (scrollViewportHeight + threshold)
-
-                            if atBottomNow && !isAtBottom.wrappedValue {
+                                proxy.scrollTo(ScrollTarget.bottom, anchor: .bottom)
                                 unread.wrappedValue = 0
+                                isAtBottom.wrappedValue = true
+                                scrollPositionByContact[contact.id] = .bottom
                             }
-                            isAtBottom.wrappedValue = atBottomNow
                         }
                     }
 
-                    // кнопка “New messages”
                     if !isAtBottom.wrappedValue && unread.wrappedValue > 0 {
                         Button {
                             withAnimation(.easeOut(duration: 0.2)) {
-                                proxy.scrollTo("BOTTOM", anchor: .bottom)
+                                proxy.scrollTo(ScrollTarget.bottom, anchor: .bottom)
                             }
+                            scrollPositionByContact[contact.id] = .bottom
                             unread.wrappedValue = 0
                             isAtBottom.wrappedValue = true
                         } label: {
@@ -278,10 +221,6 @@ struct MainView: View {
                         .padding(.bottom, 12)
                     }
                 }
-
-                // новые сообщения:
-                // - если мы внизу → автоскролл
-                // - если не внизу → НЕ скроллим, увеличиваем unread только для входящих
                 .onChange(of: chatMessages.count) { oldValue, newValue in
                     guard newValue > oldValue else { return }
                     guard let last = chatMessages.last else { return }
@@ -291,22 +230,23 @@ struct MainView: View {
                     if isAtBottom.wrappedValue {
                         DispatchQueue.main.async {
                             withAnimation(.easeOut(duration: 0.2)) {
-                                proxy.scrollTo("BOTTOM", anchor: .bottom)
+                                proxy.scrollTo(ScrollTarget.bottom, anchor: .bottom)
                             }
+                            scrollPositionByContact[contact.id] = .bottom
                             unread.wrappedValue = 0
                         }
-                    } else {
-                        if !outgoing {
-                            unread.wrappedValue += 1
-                        }
+                    } else if !outgoing {
+                        unread.wrappedValue += 1
                     }
                 }
+                .onChange(of: scrollPositionByContact[contact.id]) { _, newValue in
+                    guard let newValue else { return }
 
-                // при уходе из чата — запоминаем позицию
-                .onDisappear {
-                    if let topId = currentTopVisibleMessageId {
-                        topMessageByContact[contact.id] = topId
+                    let atBottomNow = (newValue == .bottom)
+                    if atBottomNow && !isAtBottom.wrappedValue {
+                        unread.wrappedValue = 0
                     }
+                    isAtBottom.wrappedValue = atBottomNow
                 }
             }
 
