@@ -1,13 +1,5 @@
 import SwiftUI
 
-
-
-private enum ScrollTarget: Hashable {
-    case message(UUID)
-    case bottom
-}
-
-
 // MARK: - MainView
 
 struct MainView: View {
@@ -38,13 +30,10 @@ struct MainView: View {
     @State private var addContactError: String?
 
     // Per-chat state
-    @State private var scrollPositionByContact: [UUID: ScrollTarget] = [:]
+    @State private var scrollOffsetByContact: [UUID: CGFloat] = [:]
+    @State private var scrollToBottomTickByContact: [UUID: Int] = [:]
     @State private var unreadByContact: [UUID: Int] = [:]
     @State private var atBottomByContact: [UUID: Bool] = [:]
-
-    // Current chat runtime tracking (to save position correctly)
-    @State private var isRestoringScrollByContact: [UUID: Bool] = [:]
-    
 
     private let transport: FileTransport
 
@@ -152,101 +141,91 @@ struct MainView: View {
             set: { atBottomByContact[contact.id] = $0 }
         )
 
-        let scrollPosition = Binding<ScrollTarget?>(
-            get: { scrollPositionByContact[contact.id] },
-            set: { scrollPositionByContact[contact.id] = $0 }
+        let scrollOffset = Binding<CGFloat>(
+            get: { scrollOffsetByContact[contact.id] ?? 0 },
+            set: { scrollOffsetByContact[contact.id] = $0 }
+        )
+
+        let scrollToBottomTick = Binding<Int>(
+            get: { scrollToBottomTickByContact[contact.id] ?? 0 },
+            set: { scrollToBottomTickByContact[contact.id] = $0 }
         )
 
         return VStack(spacing: 0) {
-            ScrollViewReader { proxy in
-                ZStack(alignment: .bottomTrailing) {
-                    ScrollView {
-                        LazyVStack(spacing: 10) {
-                            ForEach(chatMessages) { msg in
-                                let outgoing = (msg.senderSessionId == mySessionId)
+            ZStack(alignment: .bottomTrailing) {
+                PreciseScrollView(
+                    offsetY: scrollOffset,
+                    isAtBottom: isAtBottom,
+                    restoreID: contact.id,
+                    scrollToBottomTick: scrollToBottomTick.wrappedValue
+                ) {
+                    LazyVStack(spacing: 10) {
+                        ForEach(chatMessages) { msg in
+                            let outgoing = (msg.senderSessionId == mySessionId)
 
-                                HStack {
-                                    if outgoing { Spacer(minLength: 40) }
+                            HStack {
+                                if outgoing { Spacer(minLength: 40) }
 
-                                    Text(msg.body)
-                                        .foregroundStyle(outgoing ? Color.white : Color.primary)
-                                        .padding(10)
-                                        .background(outgoing ? Color.blue : Color.gray.opacity(0.18))
-                                        .cornerRadius(12)
-                                        .frame(maxWidth: 520, alignment: outgoing ? .trailing : .leading)
+                                Text(msg.body)
+                                    .foregroundStyle(outgoing ? Color.white : Color.primary)
+                                    .padding(10)
+                                    .background(outgoing ? Color.blue : Color.gray.opacity(0.18))
+                                    .cornerRadius(12)
+                                    .frame(maxWidth: 520, alignment: outgoing ? .trailing : .leading)
 
-                                    if !outgoing { Spacer(minLength: 40) }
-                                }
-                                .id(ScrollTarget.message(msg.id))
-                            }
-
-                            Color.clear
-                                .frame(height: 1)
-                                .id(ScrollTarget.bottom)
-                        }
-                        .padding()
-                        .scrollTargetLayout()
-                    }
-                    .scrollPosition(id: scrollPosition, anchor: .top)
-                    .defaultScrollAnchor(.bottom)
-                    .onAppear {
-                        if scrollPositionByContact[contact.id] == nil {
-                            DispatchQueue.main.async {
-                                proxy.scrollTo(ScrollTarget.bottom, anchor: .bottom)
-                                unread.wrappedValue = 0
-                                isAtBottom.wrappedValue = true
-                                scrollPositionByContact[contact.id] = .bottom
+                                if !outgoing { Spacer(minLength: 40) }
                             }
                         }
                     }
+                    .padding()
+                }
+                .onAppear {
+                    if scrollToBottomTickByContact[contact.id] == nil {
+                        scrollToBottomTickByContact[contact.id] = 0
+                    }
 
-                    if !isAtBottom.wrappedValue && unread.wrappedValue > 0 {
-                        Button {
-                            withAnimation(.easeOut(duration: 0.2)) {
-                                proxy.scrollTo(ScrollTarget.bottom, anchor: .bottom)
-                            }
-                            scrollPositionByContact[contact.id] = .bottom
+                    if scrollOffsetByContact[contact.id] == nil {
+                        DispatchQueue.main.async {
+                            scrollToBottomTickByContact[contact.id, default: 0] += 1
                             unread.wrappedValue = 0
                             isAtBottom.wrappedValue = true
-                        } label: {
-                            HStack(spacing: 8) {
-                                Image(systemName: "arrow.down")
-                                Text("New messages (\(unread.wrappedValue))")
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .padding(.trailing, 16)
-                        .padding(.bottom, 12)
                     }
                 }
-                .onChange(of: chatMessages.count) { oldValue, newValue in
-                    guard newValue > oldValue else { return }
-                    guard let last = chatMessages.last else { return }
 
-                    let outgoing = (last.senderSessionId == mySessionId)
-
-                    if isAtBottom.wrappedValue {
-                        DispatchQueue.main.async {
-                            withAnimation(.easeOut(duration: 0.2)) {
-                                proxy.scrollTo(ScrollTarget.bottom, anchor: .bottom)
-                            }
-                            scrollPositionByContact[contact.id] = .bottom
-                            unread.wrappedValue = 0
+                if !isAtBottom.wrappedValue && unread.wrappedValue > 0 {
+                    Button {
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            scrollToBottomTickByContact[contact.id, default: 0] += 1
                         }
-                    } else if !outgoing {
-                        unread.wrappedValue += 1
+                        unread.wrappedValue = 0
+                        isAtBottom.wrappedValue = true
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "arrow.down")
+                            Text("New messages (\(unread.wrappedValue))")
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
                     }
+                    .buttonStyle(.borderedProminent)
+                    .padding(.trailing, 16)
+                    .padding(.bottom, 12)
                 }
-                .onChange(of: scrollPositionByContact[contact.id]) { _, newValue in
-                    guard let newValue else { return }
+            }
+            .onChange(of: chatMessages.count) { oldValue, newValue in
+                guard newValue > oldValue else { return }
+                guard let last = chatMessages.last else { return }
 
-                    let atBottomNow = (newValue == .bottom)
-                    if atBottomNow && !isAtBottom.wrappedValue {
+                let outgoing = (last.senderSessionId == mySessionId)
+
+                if isAtBottom.wrappedValue {
+                    DispatchQueue.main.async {
+                        scrollToBottomTickByContact[contact.id, default: 0] += 1
                         unread.wrappedValue = 0
                     }
-                    isAtBottom.wrappedValue = atBottomNow
+                } else if !outgoing {
+                    unread.wrappedValue += 1
                 }
             }
 
