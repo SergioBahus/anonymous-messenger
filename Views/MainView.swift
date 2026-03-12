@@ -153,12 +153,20 @@ struct MainView: View {
 
         let contentHeight = Binding<CGFloat>(
             get: { contentHeightByContact[contact.id] ?? 0 },
-            set: { contentHeightByContact[contact.id] = $0 }
+            set: { newValue in
+                DispatchQueue.main.async {
+                    contentHeightByContact[contact.id] = newValue
+                }
+            }
         )
 
         let viewportHeight = Binding<CGFloat>(
             get: { viewportHeightByContact[contact.id] ?? 0 },
-            set: { viewportHeightByContact[contact.id] = $0 }
+            set: { newValue in
+                DispatchQueue.main.async {
+                    viewportHeightByContact[contact.id] = newValue
+                }
+            }
         )
 
         return VStack(spacing: 0) {
@@ -242,18 +250,26 @@ struct MainView: View {
 
                 let outgoing = (last.senderSessionId == mySessionId)
 
-                if isAtBottom.wrappedValue {
+                if outgoing {
                     DispatchQueue.main.async {
                         scrollToBottomTickByContact[contact.id, default: 0] += 1
                         unread.wrappedValue = 0
                         firstUnreadOffsetByContact[contact.id] = nil
                     }
-                } else if !outgoing {
+                } else if isAtBottom.wrappedValue {
+                    DispatchQueue.main.async {
+                        scrollToBottomTickByContact[contact.id, default: 0] += 1
+                        unread.wrappedValue = 0
+                        firstUnreadOffsetByContact[contact.id] = nil
+                    }
+                } else {
                     if unread.wrappedValue == 0 {
                         let contentHeight = contentHeightByContact[contact.id] ?? 0
                         let viewportHeight = viewportHeightByContact[contact.id] ?? 0
-                        let firstUnreadOffset = max(0, contentHeight - viewportHeight)
-                        firstUnreadOffsetByContact[contact.id] = firstUnreadOffset
+                        let oldBottomOffset = max(0, contentHeight - viewportHeight)
+
+                        let revealPadding: CGFloat = 80
+                        firstUnreadOffsetByContact[contact.id] = oldBottomOffset + revealPadding
                     }
 
                     unread.wrappedValue += 1
