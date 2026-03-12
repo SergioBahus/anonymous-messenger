@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 // MARK: - MainView
 
@@ -23,6 +24,7 @@ struct MainView: View {
     @State private var draft: String = ""
     @State private var inputHeight: CGFloat = 34
     @State private var inputPinnedToMax: Bool = false
+    @State private var selectedAttachmentURL: URL?
 
     // UI
     @State private var isShowingAddContact: Bool = false
@@ -284,36 +286,87 @@ struct MainView: View {
 
             Divider()
 
-            HStack(spacing: 10) {
-                GrowingTextEditor(
-                    text: $draft,
-                    height: $inputHeight,
-                    pinnedToMax: $inputPinnedToMax,
-                    maxLines: 10,
-                    onEnterSend: {
-                        sendMessage(to: contact)
+            VStack(spacing: 8) {
+                if let attachment = selectedAttachmentURL {
+                    HStack(spacing: 8) {
+                        Image(systemName: "doc.fill")
+                            .foregroundStyle(.secondary)
+
+                        Text(attachment.lastPathComponent)
+                            .font(.system(size: 13))
+                            .lineLimit(1)
+
+                        Spacer()
+
+                        Button {
+                            selectedAttachmentURL = nil
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
                     }
-                )
-                .frame(height: inputHeight)
-                .padding(.vertical, 6)
-                .padding(.horizontal, 6)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(Color.primary.opacity(0.06))
+                    )
+                }
+
+                HStack(alignment: .bottom, spacing: 8) {
+                    Button {
+                        attachFile()
+                    } label: {
+                        Image(systemName: "paperclip")
+                            .font(.system(size: 18, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 32, height: 32)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
+                    GrowingTextEditor(
+                        text: $draft,
+                        height: $inputHeight,
+                        pinnedToMax: $inputPinnedToMax,
+                        maxLines: 10,
+                        onEnterSend: {
+                            sendMessage(to: contact)
+                        }
+                    )
+                    .frame(height: inputHeight)
+
+                    Button {
+                        sendMessage(to: contact)
+                    } label: {
+                        Image(systemName: "paperplane.circle.fill")
+                            .font(.system(size: 26))
+                            .foregroundStyle(canSendMessage ? Color.blue : Color.gray.opacity(0.45))
+                            .scaleEffect(canSendMessage ? 1.0 : 0.96)
+                            .animation(.easeInOut(duration: 0.15), value: canSendMessage)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canSendMessage)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
                 .background(
-                    RoundedRectangle(cornerRadius: 10)
+                    RoundedRectangle(cornerRadius: 18)
                         .fill(Color.primary.opacity(0.06))
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color.primary.opacity(0.18))
+                    RoundedRectangle(cornerRadius: 18)
+                        .stroke(Color.primary.opacity(0.14))
                 )
-
-                Button("Send") {
-                    sendMessage(to: contact)
-                }
             }
-            .padding()
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
         }
     }
-
+    private var canSendMessage: Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
     // MARK: - Data helpers
 
     private func messages(with contact: Contact) -> [ChatMessage] {
@@ -349,6 +402,17 @@ struct MainView: View {
         StorageService.shared.save(appData, for: mySessionId)
         selectedContactId = new.id
     }
+    
+    private func attachFile() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+
+        if panel.runModal() == .OK {
+            selectedAttachmentURL = panel.url
+        }
+    }
 
     private func sendMessage(to contact: Contact) {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -375,6 +439,7 @@ struct MainView: View {
         StorageService.shared.save(appData, for: mySessionId)
 
         draft = ""
+        selectedAttachmentURL = nil
         inputPinnedToMax = false
         inputHeight = 34
 

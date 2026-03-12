@@ -39,8 +39,8 @@ struct GrowingTextEditor: NSViewRepresentable {
 
         // фон рисуем SwiftUI-обёрткой
         textView.drawsBackground = false
-        textView.font = NSFont.systemFont(ofSize: 14)
-        textView.textContainerInset = NSSize(width: 8, height: 8)
+        textView.font = NSFont.systemFont(ofSize: 15)
+        textView.textContainerInset = NSSize(width: 4, height: 8)
 
         // Enter/Shift+Enter логика
         textView.onEnterSend = onEnterSend
