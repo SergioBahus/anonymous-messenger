@@ -21,8 +21,11 @@ struct ChatMessage: Identifiable, Codable, Hashable {
     var receiverSessionId: String
     var timestamp: Date
 
-    // Пока plaintext для MVP. Скоро заменим на ciphertext.
     var body: String
+
+    var attachmentFileName: String?
+    var attachmentStoredName: String?
+    var attachmentLocalPath: String?
 
     var status: DeliveryStatus
 }
@@ -34,8 +37,11 @@ struct Envelope: Identifiable, Codable, Hashable {
     let receiverSessionId: String
     let timestamp: Date
 
-    // payload для сети (позже будет ciphertext+nonce+etc)
     let payload: String
+
+    // файл
+    let attachmentFileName: String?
+    let attachmentStoredName: String?
 }
 
 struct AppData: Codable {

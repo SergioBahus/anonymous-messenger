@@ -190,12 +190,39 @@ struct MainView: View {
                             HStack {
                                 if outgoing { Spacer(minLength: 40) }
 
-                                Text(msg.body)
-                                    .foregroundStyle(outgoing ? Color.white : Color.primary)
-                                    .padding(10)
-                                    .background(outgoing ? Color.blue : Color.gray.opacity(0.18))
-                                    .cornerRadius(12)
-                                    .frame(maxWidth: 520, alignment: outgoing ? .trailing : .leading)
+                                VStack(alignment: outgoing ? .trailing : .leading, spacing: 6) {
+                                    if let fileName = msg.attachmentFileName {
+                                        if let localPath = msg.attachmentLocalPath {
+                                            Button {
+                                                NSWorkspace.shared.open(URL(fileURLWithPath: localPath))
+                                            } label: {
+                                                HStack(spacing: 8) {
+                                                    Image(systemName: "doc.fill")
+                                                    Text(fileName)
+                                                        .lineLimit(1)
+                                                }
+                                                .foregroundStyle(outgoing ? Color.white : Color.primary)
+                                            }
+                                            .buttonStyle(.plain)
+                                        } else {
+                                            HStack(spacing: 8) {
+                                                Image(systemName: "doc.fill")
+                                                Text(fileName)
+                                                    .lineLimit(1)
+                                            }
+                                            .foregroundStyle(outgoing ? Color.white : Color.primary)
+                                        }
+                                    }
+
+                                    if !msg.body.isEmpty {
+                                        Text(msg.body)
+                                            .foregroundStyle(outgoing ? Color.white : Color.primary)
+                                    }
+                                }
+                                .padding(10)
+                                .background(outgoing ? Color.blue : Color.gray.opacity(0.18))
+                                .cornerRadius(12)
+                                .frame(maxWidth: 520, alignment: outgoing ? .trailing : .leading)
 
                                 if !outgoing { Spacer(minLength: 40) }
                             }
@@ -365,7 +392,7 @@ struct MainView: View {
         }
     }
     private var canSendMessage: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || selectedAttachmentURL != nil
     }
     // MARK: - Data helpers
 
@@ -416,14 +443,21 @@ struct MainView: View {
 
     private func sendMessage(to contact: Contact) {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+
+        guard !text.isEmpty || selectedAttachmentURL != nil else { return }
+
+        let storedAttachmentName = selectedAttachmentURL.map {
+            UUID().uuidString + "_" + $0.lastPathComponent
+        }
 
         let env = Envelope(
             id: UUID(),
             senderSessionId: mySessionId,
             receiverSessionId: contact.sessionId,
             timestamp: Date(),
-            payload: text
+            payload: text,
+            attachmentFileName: selectedAttachmentURL?.lastPathComponent,
+            attachmentStoredName: storedAttachmentName
         )
 
         let outgoing = ChatMessage(
@@ -432,24 +466,26 @@ struct MainView: View {
             receiverSessionId: env.receiverSessionId,
             timestamp: env.timestamp,
             body: text,
+            attachmentFileName: env.attachmentFileName,
+            attachmentStoredName: env.attachmentStoredName,
+            attachmentLocalPath: selectedAttachmentURL?.path,
             status: .sent
         )
 
         appData.messages.append(outgoing)
         StorageService.shared.save(appData, for: mySessionId)
 
+        transport.send(env, attachmentURL: selectedAttachmentURL)
+
         draft = ""
         selectedAttachmentURL = nil
         inputPinnedToMax = false
         inputHeight = 34
-
-        transport.send(env)
     }
 
     private func handleIncoming(_ envelope: Envelope) {
         guard envelope.receiverSessionId == mySessionId else { return }
 
-        // авто-добавление контакта, если известен username на этом устройстве
         if !appData.contacts.contains(where: { $0.sessionId == envelope.senderSessionId }) {
             if let username = ProfileService.shared.usernameForSessionId(envelope.senderSessionId) {
                 let newContact = Contact(id: UUID(), sessionId: envelope.senderSessionId, username: username)
@@ -462,12 +498,21 @@ struct MainView: View {
             }
         }
 
+        let localAttachmentPath: String? = {
+            guard let storedName = envelope.attachmentStoredName else { return nil }
+            let localURL = transport.attachmentsDir(for: mySessionId).appendingPathComponent(storedName)
+            return FileManager.default.fileExists(atPath: localURL.path) ? localURL.path : nil
+        }()
+
         let incoming = ChatMessage(
             id: envelope.id,
             senderSessionId: envelope.senderSessionId,
             receiverSessionId: envelope.receiverSessionId,
             timestamp: envelope.timestamp,
             body: envelope.payload,
+            attachmentFileName: envelope.attachmentFileName,
+            attachmentStoredName: envelope.attachmentStoredName,
+            attachmentLocalPath: localAttachmentPath,
             status: .delivered
         )
 
